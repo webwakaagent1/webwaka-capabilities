@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const app = express();
-const PORT = parseInt(process.env.CB3_PORT || '5001', 10);
+const PORT = parseInt(process.env.CB3_PORT || '5000', 10);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
