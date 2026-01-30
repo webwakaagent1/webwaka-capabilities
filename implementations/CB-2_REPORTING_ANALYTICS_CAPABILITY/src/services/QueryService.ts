@@ -1,9 +1,23 @@
 import { pool } from '../config/database';
 import { logger } from '../utils/logger';
-import { QueryOptions, QueryResult, QueryFilter, OrderBy, DateRange, Granularity } from '../models/types';
+import { QueryOptions, QueryResult, QueryFilter, DateRange } from '../models/types';
+import {
+  validateGranularity,
+  sanitizeMetricNames,
+  sanitizeGroupByFields,
+  extractDimensionKey,
+  sanitizeIdentifier,
+  validateFieldName,
+  validateOrderDirection,
+  validateTenantId,
+} from '../utils/sanitize';
 
 export class QueryService {
   async executeQuery(tenantId: string, options: QueryOptions): Promise<QueryResult> {
+    if (!validateTenantId(tenantId)) {
+      throw new Error('Invalid tenant ID format');
+    }
+
     const startTime = Date.now();
     const client = await pool.connect();
 
@@ -45,21 +59,24 @@ export class QueryService {
     const selectFields: string[] = [];
     
     if (options.granularity) {
+      if (!validateGranularity(options.granularity)) {
+        throw new Error(`Invalid granularity: ${options.granularity}`);
+      }
       selectFields.push(`date_trunc('${options.granularity}', timestamp) as period`);
     }
 
-    if (options.groupBy && options.groupBy.length > 0) {
-      for (const field of options.groupBy) {
-        if (field.startsWith('dimensions.')) {
-          const dimKey = field.replace('dimensions.', '');
-          selectFields.push(`dimensions->>'${dimKey}' as "${field}"`);
-        } else {
-          selectFields.push(field);
-        }
+    const sanitizedGroupBy = options.groupBy ? sanitizeGroupByFields(options.groupBy) : [];
+    for (const field of sanitizedGroupBy) {
+      const dimKey = extractDimensionKey(field);
+      if (dimKey) {
+        selectFields.push(`dimensions->>'${dimKey}' as "${field}"`);
+      } else if (validateFieldName(field)) {
+        selectFields.push(sanitizeIdentifier(field));
       }
     }
 
-    for (const metric of options.metrics) {
+    const sanitizedMetrics = sanitizeMetricNames(options.metrics);
+    for (const metric of sanitizedMetrics) {
       selectFields.push(`SUM(CASE WHEN metric_name = '${metric}' THEN value ELSE 0 END) as "${metric}_sum"`);
       selectFields.push(`COUNT(CASE WHEN metric_name = '${metric}' THEN 1 END) as "${metric}_count"`);
       selectFields.push(`AVG(CASE WHEN metric_name = '${metric}' THEN value END) as "${metric}_avg"`);
@@ -71,9 +88,9 @@ export class QueryService {
 
     let sql = `SELECT ${selectFields.join(', ')} FROM cb2_metrics WHERE tenant_id = $1`;
 
-    if (options.metrics.length > 0) {
+    if (sanitizedMetrics.length > 0) {
       sql += ` AND metric_name = ANY($${paramIndex++})`;
-      params.push(options.metrics);
+      params.push(sanitizedMetrics);
     }
 
     if (options.filters) {
@@ -94,17 +111,15 @@ export class QueryService {
     }
 
     const groupByFields: string[] = [];
-    if (options.granularity) {
+    if (options.granularity && validateGranularity(options.granularity)) {
       groupByFields.push(`date_trunc('${options.granularity}', timestamp)`);
     }
-    if (options.groupBy) {
-      for (const field of options.groupBy) {
-        if (field.startsWith('dimensions.')) {
-          const dimKey = field.replace('dimensions.', '');
-          groupByFields.push(`dimensions->>'${dimKey}'`);
-        } else {
-          groupByFields.push(field);
-        }
+    for (const field of sanitizedGroupBy) {
+      const dimKey = extractDimensionKey(field);
+      if (dimKey) {
+        groupByFields.push(`dimensions->>'${dimKey}'`);
+      } else if (validateFieldName(field)) {
+        groupByFields.push(sanitizeIdentifier(field));
       }
     }
     if (groupByFields.length > 0) {
@@ -112,8 +127,12 @@ export class QueryService {
     }
 
     if (options.orderBy && options.orderBy.length > 0) {
-      const orderClauses = options.orderBy.map(o => `"${o.field}" ${o.direction.toUpperCase()}`);
-      sql += ` ORDER BY ${orderClauses.join(', ')}`;
+      const orderClauses = options.orderBy
+        .filter(o => validateFieldName(o.field) && validateOrderDirection(o.direction))
+        .map(o => `"${sanitizeIdentifier(o.field)}" ${o.direction.toUpperCase()}`);
+      if (orderClauses.length > 0) {
+        sql += ` ORDER BY ${orderClauses.join(', ')}`;
+      }
     } else if (options.granularity) {
       sql += ` ORDER BY period`;
     }
@@ -129,9 +148,14 @@ export class QueryService {
   }
 
   private buildFilterClause(filter: QueryFilter, paramIndex: number): { clause: string; value: unknown } {
-    const field = filter.field.startsWith('dimensions.')
-      ? `dimensions->>'${filter.field.replace('dimensions.', '')}'`
-      : filter.field;
+    if (!validateFieldName(filter.field)) {
+      throw new Error(`Invalid filter field: ${filter.field}`);
+    }
+    
+    const dimKey = extractDimensionKey(filter.field);
+    const field = dimKey
+      ? `dimensions->>'${dimKey}'`
+      : sanitizeIdentifier(filter.field);
 
     switch (filter.operator) {
       case 'eq':
@@ -197,6 +221,10 @@ export class QueryService {
   }
 
   async getAvailableDimensions(tenantId: string, metricName?: string): Promise<string[]> {
+    if (!validateTenantId(tenantId)) {
+      throw new Error('Invalid tenant ID format');
+    }
+
     const client = await pool.connect();
     try {
       let query = `
