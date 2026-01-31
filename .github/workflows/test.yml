@@ -1,0 +1,46 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x]
+        implementation:
+          - CB-2_REPORTING_ANALYTICS_CAPABILITY
+          - CB-3_CONTENT_MANAGEMENT_CAPABILITY
+          - cb1-mlas-capability
+          - cb4-inventory-management
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: implementations/${{ matrix.implementation }}/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: ./implementations/${{ matrix.implementation }}
+        run: npm ci
+      
+      - name: Run tests
+        working-directory: ./implementations/${{ matrix.implementation }}
+        run: npm test -- --coverage
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./implementations/${{ matrix.implementation }}/coverage/lcov.info
+          flags: ${{ matrix.implementation }}
+          name: ${{ matrix.implementation }}
+          fail_ci_if_error: false
